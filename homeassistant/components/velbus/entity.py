@@ -10,6 +10,7 @@ from velbusaio.channels import Channel as VelbusChannel
 from velbusaio.properties import Property as VelbusProperty
 
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
@@ -49,6 +50,15 @@ class VelbusEntity(Entity):
                 DOMAIN,
                 self._module_address,
             )
+        # Disable by default only if the channel name is user-editable (Editable=yes
+        # in the module spec) and the name hasn't been customized yet. This avoids
+        # cluttering the entity list with channels the user hasn't configured.
+        # Properties (e.g. LightValue) are never disabled since their name is fixed.
+        if (
+            channel.is_name_editable()
+            and channel.get_name() == channel.get_default_name()
+        ):
+            self._attr_entity_registry_enabled_default = False
         serial = channel.get_module_serial() or self._module_address
         self._attr_unique_id = f"{serial}-{channel.get_channel_number()}"
 
@@ -68,7 +78,28 @@ class VelbusEntity(Entity):
 
     async def _on_update(self) -> None:
         """Handle status updates from the channel."""
-        self.async_write_ha_state()
+        # Re-enable a channel that was disabled by this integration when its name
+        # was still the default. Once the user gives the channel a custom name on
+        # the Velbus module, we automatically enable it in HA.
+        #
+        # We only act when disabled_by == INTEGRATION so that we never override
+        # a choice the user made manually (e.g. they explicitly enabled or disabled
+        # the entity themselves).
+        #
+        # We intentionally never re-disable here: disabling only happens at initial
+        # load (see __init__). If the user manually enabled a channel whose name is
+        # still the default, that choice is respected.
+        if (
+            self.registry_entry is not None
+            and self._channel.is_name_editable()
+            and self.registry_entry.disabled_by == er.RegistryEntryDisabler.INTEGRATION
+            and self._channel.get_name() != self._channel.get_default_name()
+        ):
+            # Name changed away from the default → lift the integration-imposed disable
+            registry = er.async_get(self.hass)
+            registry.async_update_entity(self.entity_id, disabled_by=None)
+        if self.enabled:
+            self.async_write_ha_state()
 
     @property
     def available(self) -> bool:

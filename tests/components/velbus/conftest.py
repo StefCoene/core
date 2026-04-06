@@ -112,6 +112,8 @@ def mock_button() -> AsyncMock:
     channel = AsyncMock(spec=Button)
     channel.get_categories.return_value = ["binary_sensor", "led", "button"]
     channel.get_name.return_value = "ButtonOn"
+    channel.get_default_name.return_value = "ButtonOn"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 1
     channel.get_channel_number.return_value = 1
     channel.get_module_type_name.return_value = "VMB4RYLD"
@@ -131,6 +133,8 @@ def mock_temperature() -> AsyncMock:
     channel = AsyncMock(spec=Temperature)
     channel.get_categories.return_value = ["sensor", "climate"]
     channel.get_name.return_value = "Temperature"
+    channel.get_default_name.return_value = "Temperature"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 88
     channel.get_channel_number.return_value = 3
     channel.get_module_type_name.return_value = "VMB4GPO"
@@ -159,6 +163,8 @@ def mock_relay() -> AsyncMock:
     channel = AsyncMock(spec=Relay)
     channel.get_categories.return_value = ["switch"]
     channel.get_name.return_value = "RelayName"
+    channel.get_default_name.return_value = "RelayName"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 88
     channel.get_channel_number.return_value = 55
     channel.get_module_type_name.return_value = "VMB4RYNO"
@@ -177,6 +183,8 @@ def mock_select() -> AsyncMock:
     channel = AsyncMock(spec=SelectedProgram)
     channel.get_categories.return_value = ["select"]
     channel.get_name.return_value = "select"
+    channel.get_default_name.return_value = "select"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 88
     channel.get_channel_number.return_value = 33
     channel.get_module_type_name.return_value = "VMB4RYNO"
@@ -196,6 +204,8 @@ def mock_buttoncounter() -> AsyncMock:
     channel = AsyncMock(spec=ButtonCounter)
     channel.get_categories.return_value = ["sensor"]
     channel.get_name.return_value = "ButtonCounter"
+    channel.get_default_name.return_value = "ButtonCounter"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 88
     channel.get_channel_number.return_value = 2
     channel.get_module_type_name.return_value = "VMB7IN"
@@ -219,6 +229,8 @@ def mock_sensornumber() -> AsyncMock:
     channel = AsyncMock(spec=SensorNumber)
     channel.get_categories.return_value = ["sensor"]
     channel.get_name.return_value = "SensorNumber"
+    channel.get_default_name.return_value = "SensorNumber"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 2
     channel.get_channel_number.return_value = 3
     channel.get_module_type_name.return_value = "VMB7IN"
@@ -240,6 +252,8 @@ def mock_lightsensor() -> AsyncMock:
     channel = AsyncMock(spec=LightValue)
     channel.get_categories.return_value = ["sensor"]
     channel.get_name.return_value = "LightSensor"
+    channel.get_default_name.return_value = "LightSensor"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 2
     channel.get_channel_number.return_value = 4
     channel.get_module_type_name.return_value = "VMB7IN"
@@ -261,6 +275,8 @@ def mock_dimmer() -> AsyncMock:
     channel = AsyncMock(spec=Dimmer)
     channel.get_categories.return_value = ["light"]
     channel.get_name.return_value = "Dimmer"
+    channel.get_default_name.return_value = "Dimmer"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 88
     channel.get_channel_number.return_value = 10
     channel.get_module_type_name.return_value = "VMBDN1"
@@ -280,6 +296,8 @@ def mock_cover() -> AsyncMock:
     channel = AsyncMock(spec=Blind)
     channel.get_categories.return_value = ["cover"]
     channel.get_name.return_value = "CoverName"
+    channel.get_default_name.return_value = "CoverName"
+    channel.is_name_editable.return_value = False
     channel.get_module_address.return_value = 88
     channel.get_channel_number.return_value = 9
     channel.get_module_type_name.return_value = "VMB2BLE"
