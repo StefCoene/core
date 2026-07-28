@@ -412,7 +412,8 @@ async def ws_get_module(
         vol.Required(CONF_CONFIG_ENTRY): str,
         vol.Required(CONF_ADDRESS): vol.All(vol.Coerce(int), vol.Range(min=1, max=254)),
         # Specs include editable channels above 32 (e.g. temperature name 33/34).
-        vol.Required(CONF_CHANNEL): vol.All(vol.Coerce(int), vol.Range(min=1, max=64)),
+        # Channel 0 is a module level setting, which lives on a property.
+        vol.Required(CONF_CHANNEL): vol.All(vol.Coerce(int), vol.Range(min=0, max=64)),
         vol.Required("key"): str,
         vol.Required("value"): vol.Any(str, bool, int, float),
     }
@@ -427,7 +428,6 @@ async def ws_set_module_config(
     msg: dict[str, Any],
 ) -> None:
     """Write a module or channel configuration parameter."""
-    require_advanced_mode(entry)
     module = controller.get_module(msg[CONF_ADDRESS])
     if module is None:
         connection.send_error(
@@ -437,26 +437,21 @@ async def ws_set_module_config(
         )
         return
 
-    channel = module.get_channels().get(msg[CONF_CHANNEL])
-    if channel is None or not hasattr(channel, "get_config_parameters"):
-        connection.send_error(
-            msg["id"],
-            websocket_api.const.ERR_NOT_FOUND,
-            f"Channel {msg[CONF_CHANNEL]} not found",
-        )
-        return
-
-    param = next(
-        (item for item in channel.get_config_parameters() if item.key == msg["key"]),
-        None,
-    )
+    param = module.find_config_parameter(msg["key"], msg[CONF_CHANNEL])
     if param is None:
         connection.send_error(
             msg["id"],
             websocket_api.const.ERR_INVALID_FORMAT,
-            f"Unknown config key '{msg['key']}'",
+            f"Unknown config key '{msg['key']}' on channel {msg[CONF_CHANNEL]}",
         )
         return
+
+    # Advanced mode guards the settings that change module memory, where a
+    # wrong address corrupts a name or an action table. A setting that only
+    # puts a message on the bus is either understood or ignored, so it does
+    # not need the same protection.
+    if param.writes_memory:
+        require_advanced_mode(entry)
 
     try:
         await param.set_value(msg["value"])
