@@ -103,12 +103,17 @@ async def async_update_panel(
         frontend.async_remove_panel(hass, DOMAIN, warn_if_unknown=False)
         return
 
+    # The version goes in the path rather than a query on the entry point. The
+    # panel is a set of ES modules that import each other by relative path, so
+    # only a versioned directory gives every one of them a new URL on an
+    # upgrade; a query on the entry point alone leaves the rest cached.
+    url_base = f"{URL_BASE}/{velbus_panel.__version__}"
     panel_data = hass.data.setdefault(DATA_PANEL, {})
     if not panel_data.get(DATA_STATIC_REGISTERED):
         await hass.http.async_register_static_paths(
             [
                 StaticPathConfig(
-                    URL_BASE,
+                    url_base,
                     path=velbus_panel.locate_dir(),
                     cache_headers=velbus_panel.is_prod_build,
                 )
@@ -124,9 +129,7 @@ async def async_update_panel(
         frontend_url_path=DOMAIN,
         config_panel_domain=DOMAIN,
         webcomponent_name=velbus_panel.webcomponent_name,
-        module_url=(
-            f"{URL_BASE}/{velbus_panel.entrypoint_js}?v={velbus_panel.__version__}"
-        ),
+        module_url=f"{url_base}/{velbus_panel.entrypoint_js}",
         embed_iframe=True,
         require_admin=True,
     )
