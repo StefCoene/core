@@ -322,8 +322,7 @@ async def _read_temp_settings(controller: Velbus) -> None:
     requests: list[Awaitable[None]] = [
         module.refresh_autosend_intervals()
         for module in controller.get_modules().values()
-        if module.supports_temperature()
-        and module.get_autosend_address("temperature") is not None
+        if module.get_autosend_kinds()
     ]
     requests += [
         settings.ensure_loaded()
