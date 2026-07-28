@@ -6,6 +6,7 @@ import inspect
 from typing import TYPE_CHECKING, Any, Final, overload
 
 import velbus_frontend as velbus_panel
+from velbusaio.autosend import decode_autosend_interval
 from velbusaio.exceptions import VelbusConfigError
 from velbusaio.panel_schema import get_module_instance_data, get_module_type_schema
 import voluptuous as vol
@@ -27,6 +28,7 @@ from .data import VelbusConfigEntry
 if TYPE_CHECKING:
     from velbusaio.channels import Channel
     from velbusaio.controller import Velbus
+    from velbusaio.module import Module
 
 URL_BASE: Final = "/velbus_static"
 DATA_STATIC_REGISTERED: Final = "static_registered"
@@ -261,6 +263,27 @@ def ws_get_base_data(
     )
 
 
+def _as_autosend(state: tuple[str, int | None]) -> dict[str, Any]:
+    """Return an auto send (mode, seconds) pair as a json friendly mapping."""
+    mode, seconds = state
+    return {"mode": mode, "seconds": seconds}
+
+
+def _autosend_state(module: Module) -> dict[str, Any] | None:
+    """Return how often the module sends its temperature, if it is known.
+
+    The settings are only known once something has read them off the bus;
+    listing modules must not trigger that read for every module, so an
+    unread module reports "unknown" rather than being waited for.
+    """
+    settings = module.get_temp_settings()
+    if settings is None:
+        return None
+    if not settings.is_loaded:
+        return {"mode": "unknown", "seconds": None}
+    return _as_autosend(decode_autosend_interval(settings.get("autosend_interval", 0)))
+
+
 @websocket_api.require_admin
 @websocket_api.websocket_command(
     {
@@ -281,6 +304,8 @@ def ws_list_modules(
     modules = []
     for module in controller.get_modules().values():
         address = module.get_addresses()[0]
+        temp_autosend = _autosend_state(module)
+        light = module.get_properties().get("light_value")
         channels = {
             str(channel_num): {"name": channel.get_name()}
             for channel_num, channel in module.get_channels().items()
@@ -295,6 +320,8 @@ def ws_list_modules(
                 "firmware_build": module.get_sw_version(),
                 "memory_map_build": module.get_memory_map_build(),
                 "memory_map_outdated": module.is_memory_map_outdated(),
+                "temp_autosend": temp_autosend,
+                "light_autosend": _as_autosend(light.get_autosend()) if light else None,
                 "device_id": _device_id_for_module(hass, entry, address),
                 "channels": channels,
             }
