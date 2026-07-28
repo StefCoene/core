@@ -272,12 +272,12 @@ def _as_autosend(state: tuple[str, int | None]) -> dict[str, Any]:
 
 def _autosend_state(module: Module) -> dict[str, Any] | None:
     """Return how often the module sends its temperature, if it is known."""
-    settings = module.get_temp_settings()
-    if settings is None:
+    if not module.supports_temperature():
         return None
-    if not settings.is_loaded():
+    interval = module.get_temp_autosend_interval()
+    if interval is None:
         return {"mode": "unknown", "seconds": None}
-    return _as_autosend(decode_autosend_interval(settings.get("autosend_interval", 0)))
+    return _as_autosend(decode_autosend_interval(interval))
 
 
 async def _read_temp_settings(controller: Velbus) -> None:
@@ -289,11 +289,17 @@ async def _read_temp_settings(controller: Velbus) -> None:
     unknown rather than failing the whole list.
 
     The interval lives in settings Part2, so a module that does not send that
-    part cannot answer this question and is not asked; the VMBPIRO keeps the
-    value in eeprom instead. Asking anyway would cost a timeout per module on
-    every call.
+    part cannot answer this question and is not asked; the PIR modules keep the
+    value in eeprom and are read from there instead. Asking anyway would cost a
+    timeout per module on every call.
     """
-    requests = [
+    requests: list[Awaitable[None]] = [
+        module.refresh_autosend_intervals()
+        for module in controller.get_modules().values()
+        if module.supports_temperature()
+        and module.get_autosend_address("temperature") is not None
+    ]
+    requests += [
         settings.ensure_loaded()
         for module in controller.get_modules().values()
         if (settings := module.get_temp_settings()) is not None and settings.has_part2
