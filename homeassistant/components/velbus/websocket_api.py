@@ -292,6 +292,9 @@ def ws_list_modules(
                 "type_id": module.get_type(),
                 "type_name": module.get_type_name(),
                 "serial": module.get_serial(),
+                "firmware_build": module.get_sw_version(),
+                "memory_map_build": module.get_memory_map_build(),
+                "memory_map_outdated": module.is_memory_map_outdated(),
                 "device_id": _device_id_for_module(hass, entry, address),
                 "channels": channels,
             }
