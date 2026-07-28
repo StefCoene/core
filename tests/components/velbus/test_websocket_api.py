@@ -13,6 +13,9 @@ from . import init_integration
 from tests.common import MockConfigEntry
 from tests.typing import WebSocketGenerator
 
+BUS_SETTING = "light_autosend_interval"
+MEMORY_SETTING = "name"
+
 
 def _param(key: str, *, writes_memory: bool) -> ConfigParameter:
     """Return a configuration parameter with a stubbed setter."""
@@ -33,10 +36,8 @@ def _param(key: str, *, writes_memory: bool) -> ConfigParameter:
 def params_fixture(controller: MagicMock) -> dict[str, ConfigParameter]:
     """Give the mocked module one memory parameter and one bus parameter."""
     params = {
-        "name": _param("name", writes_memory=True),
-        "light_autosend_interval": _param(
-            "light_autosend_interval", writes_memory=False
-        ),
+        MEMORY_SETTING: _param(MEMORY_SETTING, writes_memory=True),
+        BUS_SETTING: _param(BUS_SETTING, writes_memory=False),
     }
     module = controller.return_value.get_module.return_value
     module.find_config_parameter.side_effect = lambda key, channel=None: params.get(key)
@@ -64,62 +65,41 @@ async def _set_config(
     return await client.receive_json()
 
 
-@pytest.mark.usefixtures("params")
-async def test_bus_setting_does_not_need_advanced_mode(
+@pytest.mark.parametrize(
+    ("key", "advanced_mode", "succeeds"),
+    [
+        pytest.param(BUS_SETTING, False, True, id="bus_setting_without_advanced_mode"),
+        pytest.param(
+            MEMORY_SETTING, False, False, id="memory_setting_without_advanced_mode"
+        ),
+        pytest.param(
+            MEMORY_SETTING, True, True, id="memory_setting_with_advanced_mode"
+        ),
+    ],
+)
+async def test_advanced_mode_guards_only_memory_writes(
     hass: HomeAssistant,
     hass_ws_client: WebSocketGenerator,
     config_entry: MockConfigEntry,
     params: dict[str, ConfigParameter],
+    key: str,
+    advanced_mode: bool,
+    succeeds: bool,
 ) -> None:
-    """A setting sent as a bus message is allowed without advanced mode.
+    """Advanced mode guards eeprom writes, not settings sent over the bus.
 
-    It cannot corrupt anything: the module either understands the message or
+    A bus message cannot corrupt anything: the module either understands it or
     ignores it, unlike a write to an eeprom address that may be wrong.
     """
-    await init_integration(hass, config_entry)
-    assert config_entry.data.get(CONF_ADVANCED_MODE) is not True
-
-    response = await _set_config(
-        hass_ws_client, hass, config_entry, "light_autosend_interval"
-    )
-
-    assert response["success"]
-    params["light_autosend_interval"].setter.assert_awaited_once_with(60.0)
-
-
-@pytest.mark.usefixtures("params")
-async def test_memory_setting_needs_advanced_mode(
-    hass: HomeAssistant,
-    hass_ws_client: WebSocketGenerator,
-    config_entry: MockConfigEntry,
-    params: dict[str, ConfigParameter],
-) -> None:
-    """A setting that writes eeprom keeps its guard."""
-    await init_integration(hass, config_entry)
-
-    response = await _set_config(hass_ws_client, hass, config_entry, "name")
-
-    assert not response["success"]
-    params["name"].setter.assert_not_awaited()
-
-
-@pytest.mark.usefixtures("params")
-async def test_memory_setting_with_advanced_mode(
-    hass: HomeAssistant,
-    hass_ws_client: WebSocketGenerator,
-    config_entry: MockConfigEntry,
-    params: dict[str, ConfigParameter],
-) -> None:
-    """With advanced mode on, the eeprom setting goes through."""
     hass.config_entries.async_update_entry(
-        config_entry, data={**config_entry.data, CONF_ADVANCED_MODE: True}
+        config_entry, data={**config_entry.data, CONF_ADVANCED_MODE: advanced_mode}
     )
     await init_integration(hass, config_entry)
 
-    response = await _set_config(hass_ws_client, hass, config_entry, "name")
+    response = await _set_config(hass_ws_client, hass, config_entry, key)
 
-    assert response["success"]
-    params["name"].setter.assert_awaited_once_with(60.0)
+    assert response["success"] is succeeds
+    assert params[key].setter.await_count == int(succeeds)
 
 
 @pytest.mark.usefixtures("params")
