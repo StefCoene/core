@@ -229,6 +229,7 @@ def _name_source(controller: Velbus, slot: dict[str, Any]) -> dict[str, Any]:
         return slot
 
     slot["source_module_name"] = module.get_name()
+    slot["source_module_type"] = module.get_type_name()
     source_channel = slot.get("source_channel")
     if source_channel is not None:
         offset = module.calc_channel_offset(address)
