@@ -216,6 +216,28 @@ def _device_id_for_module(
     return device.id
 
 
+def _name_source(controller: Velbus, slot: dict[str, Any]) -> dict[str, Any]:
+    """Name the module and channel an action slot points at.
+
+    A slot stores a bare address and channel number. The address may be a
+    subaddress, whose channels are numbered from one again, so the module has
+    to translate it back before the name means anything.
+    """
+    address = slot.get("source_address")
+    module = controller.get_module(address) if address else None
+    if module is None:
+        return slot
+
+    slot["source_module_name"] = module.get_name()
+    source_channel = slot.get("source_channel")
+    if source_channel is not None:
+        offset = module.calc_channel_offset(address)
+        channel = module.get_channels().get(source_channel + offset)
+        if channel is not None:
+            slot["source_channel_name"] = channel.get_name()
+    return slot
+
+
 def _get_relay_channel(controller: Velbus, address: int, channel: int) -> Channel:
     module = controller.get_module(address)
     if module is None:
@@ -510,7 +532,7 @@ async def ws_get_channel_actions(
     slots = await table.get_actions(refresh=msg["refresh"], include_empty=True)
     connection.send_result(
         msg["id"],
-        {"slots": [slot.to_dict() for slot in slots]},
+        {"slots": [_name_source(controller, slot.to_dict()) for slot in slots]},
     )
 
 
