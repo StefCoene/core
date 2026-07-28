@@ -1,5 +1,6 @@
 """Velbus config panel websocket API."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from functools import wraps
 import inspect
@@ -270,18 +271,35 @@ def _as_autosend(state: tuple[str, int | None]) -> dict[str, Any]:
 
 
 def _autosend_state(module: Module) -> dict[str, Any] | None:
-    """Return how often the module sends its temperature, if it is known.
-
-    The settings are only known once something has read them off the bus;
-    listing modules must not trigger that read for every module, so an
-    unread module reports "unknown" rather than being waited for.
-    """
+    """Return how often the module sends its temperature, if it is known."""
     settings = module.get_temp_settings()
     if settings is None:
         return None
-    if not settings.is_loaded:
+    if not settings.is_loaded():
         return {"mode": "unknown", "seconds": None}
     return _as_autosend(decode_autosend_interval(settings.get("autosend_interval", 0)))
+
+
+async def _read_temp_settings(controller: Velbus) -> None:
+    """Read the temperature settings of every module that has them.
+
+    Unlike the light value interval, which rides along with a module status
+    message, these are only ever sent in reply to a request. ensure_loaded()
+    asks at most once per module, and a module that stays silent is left
+    unknown rather than failing the whole list.
+
+    The interval lives in settings Part2, so a module that does not send that
+    part cannot answer this question and is not asked; the VMBPIRO keeps the
+    value in eeprom instead. Asking anyway would cost a timeout per module on
+    every call.
+    """
+    requests = [
+        settings.ensure_loaded()
+        for module in controller.get_modules().values()
+        if (settings := module.get_temp_settings()) is not None and settings.has_part2
+    ]
+    if requests:
+        await asyncio.gather(*requests, return_exceptions=True)
 
 
 @websocket_api.require_admin
@@ -291,9 +309,9 @@ def _autosend_state(module: Module) -> dict[str, Any] | None:
         vol.Required(CONF_CONFIG_ENTRY): str,
     }
 )
+@websocket_api.async_response
 @provide_velbus
-@callback
-def ws_list_modules(
+async def ws_list_modules(
     hass: HomeAssistant,
     entry: VelbusConfigEntry,
     controller: Velbus,
@@ -301,6 +319,7 @@ def ws_list_modules(
     msg: dict[str, Any],
 ) -> None:
     """List modules for the config panel."""
+    await _read_temp_settings(controller)
     modules = []
     for module in controller.get_modules().values():
         address = module.get_addresses()[0]
