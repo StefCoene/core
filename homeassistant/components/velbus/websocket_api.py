@@ -233,13 +233,31 @@ def _name_source(controller: Velbus, slot: dict[str, Any]) -> dict[str, Any]:
 
     slot["source_module_name"] = module.get_name()
     slot["source_module_type"] = module.get_type_name()
+    # The address the panel needs to pick the module out of its own list, which
+    # is keyed on the primary address even when the slot points at a subaddress.
+    slot["source_module_address"] = module.get_address()
     source_channel = slot.get("source_channel")
     if source_channel is not None:
         offset = module.calc_channel_offset(address)
+        slot["source_module_channel"] = source_channel + offset
         channel = module.get_channels().get(source_channel + offset)
         if channel is not None:
             slot["source_channel_name"] = channel.get_name()
     return slot
+
+
+def _bus_location(module: Module, channel: int) -> tuple[int, int]:
+    """Return the address and channel the bus uses for a module channel.
+
+    A module numbers its channels through, but those above eight live on a
+    subaddress and are numbered from one again there. An action table stores
+    what the bus uses, so that is what has to be written into it.
+    """
+    block, offset = divmod(channel - 1, 8)
+    address = module.get_sub_address_dict().get(block)
+    if block == 0 or address is None:
+        return module.get_address(), channel
+    return address, offset + 1
 
 
 def _get_relay_channel(controller: Velbus, address: int, channel: int) -> Channel:
@@ -356,10 +374,14 @@ async def ws_list_modules(
         address = module.get_addresses()[0]
         temp_autosend = _autosend_state(module)
         light = module.get_properties().get("light_value")
-        channels = {
-            str(channel_num): {"name": channel.get_name()}
-            for channel_num, channel in module.get_channels().items()
-        }
+        channels = {}
+        for channel_num, channel in module.get_channels().items():
+            bus_address, bus_channel = _bus_location(module, channel_num)
+            channels[str(channel_num)] = {
+                "name": channel.get_name(),
+                "bus_address": bus_address,
+                "bus_channel": bus_channel,
+            }
         modules.append(
             {
                 "address": address,

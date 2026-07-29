@@ -116,3 +116,54 @@ async def test_unknown_key(
     assert not response["success"]
     assert "nope" in response["error"]["message"]
     assert "channel 0" in response["error"]["message"]
+
+
+async def test_modules_report_the_bus_location_of_each_channel(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    config_entry: MockConfigEntry,
+    controller: MagicMock,
+) -> None:
+    """Channels above eight live on a subaddress and are numbered from one there."""
+    modules = controller.return_value.get_modules.return_value
+    for item in modules.values():
+        item.get_autosend_kinds.return_value = []
+        item.get_temp_settings.return_value = None
+        item.supports_temperature.return_value = False
+        item.get_properties.return_value = {}
+        item.get_memory_map_build.return_value = "1915"
+        item.get_type.return_value = 42
+        item.is_memory_map_outdated.return_value = False
+    module = modules[99]
+    module.get_address.return_value = 88
+    module.get_addresses.return_value = [88]
+    module.get_sub_address_dict.return_value = {1: 89, 3: 91}
+    module.get_channels.return_value = {
+        number: MagicMock(get_name=MagicMock(return_value=f"channel {number}"))
+        for number in (1, 9, 17, 25)
+    }
+    await init_integration(hass, config_entry)
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {
+            "type": "velbus/config_panel/modules",
+            "config_entry": config_entry.entry_id,
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"]
+    channels = next(
+        item for item in response["result"]["modules"] if item["address"] == 88
+    )["channels"]
+    assert {
+        number: (info["bus_address"], info["bus_channel"])
+        for number, info in channels.items()
+    } == {
+        "1": (88, 1),
+        "9": (89, 1),
+        # Without a subaddress of its own the channel stays on the module.
+        "17": (88, 17),
+        "25": (91, 1),
+    }
