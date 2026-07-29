@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from functools import wraps
 import inspect
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, overload
 
 import velbus_frontend as velbus_panel
@@ -95,6 +96,27 @@ def _any_advanced_mode_enabled(
     return False
 
 
+def _panel_url_version() -> str:
+    """Return the path segment identifying this build of the panel.
+
+    A development checkout keeps the same version while its files change, and
+    serves them without cache headers, which still lets a browser reuse what it
+    has for a heuristic freshness window. Folding the newest modification time
+    into the path gives every restart its own url.
+    """
+    if velbus_panel.is_prod_build:
+        return str(velbus_panel.__version__)
+    newest = max(
+        (
+            path.stat().st_mtime_ns
+            for path in Path(velbus_panel.locate_dir()).rglob("*")
+            if path.is_file()
+        ),
+        default=0,
+    )
+    return f"{velbus_panel.__version__}-{newest:x}"
+
+
 async def async_update_panel(
     hass: HomeAssistant, *, unloading_entry_id: str | None = None
 ) -> None:
@@ -107,7 +129,7 @@ async def async_update_panel(
     # panel is a set of ES modules that import each other by relative path, so
     # only a versioned directory gives every one of them a new URL on an
     # upgrade; a query on the entry point alone leaves the rest cached.
-    url_base = f"{URL_BASE}/{velbus_panel.__version__}"
+    url_base = f"{URL_BASE}/{await hass.async_add_executor_job(_panel_url_version)}"
     panel_data = hass.data.setdefault(DATA_PANEL, {})
     if not panel_data.get(DATA_STATIC_REGISTERED):
         await hass.http.async_register_static_paths(
