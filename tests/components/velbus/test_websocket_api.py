@@ -167,3 +167,40 @@ async def test_modules_report_the_bus_location_of_each_channel(
         "17": (88, 17),
         "25": (91, 1),
     }
+
+
+async def test_a_channel_cannot_be_its_own_action_source(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    config_entry: MockConfigEntry,
+    controller: MagicMock,
+) -> None:
+    """Programming a channel to react to itself would feed its output back in."""
+    hass.config_entries.async_update_entry(
+        config_entry, data={**config_entry.data, CONF_ADVANCED_MODE: True}
+    )
+    module = controller.return_value.get_module.return_value
+    module.get_address.return_value = 88
+    module.get_sub_address_dict.return_value = {}
+    relay = MagicMock()
+    relay.set_action = AsyncMock()
+    module.get_channels.return_value = {1: relay}
+    await init_integration(hass, config_entry)
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {
+            "type": "velbus/config_panel/module/actions/set",
+            "config_entry": config_entry.entry_id,
+            "address": 88,
+            "channel": 1,
+            "source_address": 88,
+            "source_channel": 1,
+            "action": "on",
+        }
+    )
+    response = await client.receive_json()
+
+    assert not response["success"]
+    assert response["error"]["message"] == "A channel cannot be its own action source"
+    relay.set_action.assert_not_called()

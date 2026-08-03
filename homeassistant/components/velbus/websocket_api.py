@@ -626,6 +626,18 @@ async def ws_set_channel_action(
         connection.send_error(msg["id"], websocket_api.const.ERR_NOT_FOUND, str(err))
         return
 
+    # A channel that triggers itself feeds its own output back into its input.
+    module = controller.get_module(msg[CONF_ADDRESS])
+    if module is not None and (msg["source_address"], msg.get("source_channel")) == (
+        _bus_location(module, msg[CONF_CHANNEL])
+    ):
+        connection.send_error(
+            msg["id"],
+            websocket_api.const.ERR_INVALID_FORMAT,
+            "A channel cannot be its own action source",
+        )
+        return
+
     try:
         slot = await relay.set_action(
             source_address=msg["source_address"],
