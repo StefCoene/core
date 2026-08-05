@@ -2,11 +2,13 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from velbusaio.config import ConfigParameter
 
 from homeassistant.components.velbus.const import CONF_ADVANCED_MODE
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from . import init_integration
 
@@ -218,20 +220,26 @@ def shared_params_fixture(controller: MagicMock) -> dict[int, ConfigParameter]:
         module.get_name.return_value = f"Module {address}"
         module.get_autosend_kinds.return_value = []
         module.get_temp_settings.return_value = None
+        # Filed under the temperature channel, but there is only one of it, so
+        # it is module wide in practice.
         shared = _param(BUS_SETTING, writes_memory=False)
+        shared.channel = 33
         params[address] = shared
         module.get_config_parameters.return_value = [
             shared,
-            # Per channel, so it belongs to that channel and not to a page
-            # that writes every module at once.
-            ConfigParameter(
-                key="inhibit",
-                label="Inhibit",
-                kind="bool",
-                getter=AsyncMock(return_value=False),
-                setter=AsyncMock(),
-                channel=1,
-                writes_memory=False,
+            # Once per channel, so it belongs to those channels and not to a
+            # page that writes every module at once.
+            *(
+                ConfigParameter(
+                    key="inhibit",
+                    label="Inhibit",
+                    kind="bool",
+                    getter=AsyncMock(return_value=False),
+                    setter=AsyncMock(),
+                    channel=channel,
+                    writes_memory=False,
+                )
+                for channel in (1, 2)
             ),
             # Writes eeprom, so it is not offered installation wide either.
             _param(MEMORY_SETTING, writes_memory=True),
@@ -320,3 +328,35 @@ async def test_a_shared_setting_can_be_limited_to_named_modules(
     assert response["success"]
     assert [item["address"] for item in response["result"]["results"]] == [1]
     shared_params[99].setter.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "succeeds"),
+    [(None, True), (OSError("bus is gone"), False)],
+    ids=["sent", "connection lost"],
+)
+async def test_sync_clock_broadcasts_home_assistant_time(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    config_entry: MockConfigEntry,
+    controller: MagicMock,
+    freezer: FrozenDateTimeFactory,
+    side_effect: Exception | None,
+    succeeds: bool,
+) -> None:
+    """The clock every module gets is the one Home Assistant keeps."""
+    freezer.move_to("2026-08-05 12:00:00+02:00")
+    controller.return_value.sync_clock.side_effect = side_effect
+    await init_integration(hass, config_entry)
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {
+            "type": "velbus/config_panel/sync_clock",
+            "config_entry": config_entry.entry_id,
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is succeeds
+    assert controller.return_value.sync_clock.await_args.args[0] == dt_util.now()

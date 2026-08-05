@@ -21,6 +21,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.util import dt as dt_util
 from homeassistant.util.hass_dict import HassKey
 
 from .config import is_advanced_mode_enabled, require_advanced_mode
@@ -74,6 +75,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_module_config)
     websocket_api.async_register_command(hass, ws_list_shared_config)
     websocket_api.async_register_command(hass, ws_set_shared_config)
+    websocket_api.async_register_command(hass, ws_sync_clock)
     websocket_api.async_register_command(hass, ws_get_channel_actions)
     websocket_api.async_register_command(hass, ws_set_channel_action)
     websocket_api.async_register_command(hass, ws_clear_channel_action)
@@ -549,18 +551,25 @@ def _shared_parameters(
 ) -> dict[str, list[tuple[Module, ConfigParameter]]]:
     """Group the settings that more than one module has in common.
 
-    Only module wide settings qualify: a per channel setting like Inhibit means
-    something different on every channel, so setting it everywhere at once is
-    not a thing anyone wants. Settings that write eeprom are left out as well --
-    those are the ones where a wrong address corrupts a module, and doing that
-    to the whole installation in one click is not a button worth having.
+    What counts as module wide is how often a module has the setting, not which
+    channel it is filed under: Inhibit is there once per relay and means
+    something different on each, while a temperature autosend interval is there
+    once even though it hangs off the temperature channel.
+
+    Settings that write eeprom are left out: those are the ones where a wrong
+    address corrupts a module, and doing that to a whole installation in one
+    click is not a button worth having.
     """
     shared: dict[str, list[tuple[Module, ConfigParameter]]] = {}
     for module in controller.get_modules().values():
+        per_module: dict[str, list[ConfigParameter]] = {}
         for param in module.get_config_parameters():
-            if param.writes_memory or param.channel:
+            if param.writes_memory:
                 continue
-            shared.setdefault(param.key, []).append((module, param))
+            per_module.setdefault(param.key, []).append(param)
+        for key, params in per_module.items():
+            if len(params) == 1:
+                shared.setdefault(key, []).append((module, params[0]))
     return {key: entries for key, entries in shared.items() if len(entries) > 1}
 
 
@@ -669,6 +678,38 @@ async def ws_set_shared_config(
         for (module, _param), outcome in zip(entries, outcomes, strict=True)
     ]
     connection.send_result(msg["id"], {"results": results})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "velbus/config_panel/sync_clock",
+        vol.Required(CONF_CONFIG_ENTRY): str,
+    }
+)
+@websocket_api.async_response
+@provide_velbus
+async def ws_sync_clock(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    controller: Velbus,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Broadcast the current time to every module."""
+    try:
+        # Home Assistant's own local time, not the clock of whatever host holds
+        # the bus connection.
+        await controller.sync_clock(dt_util.now())
+    except OSError as err:
+        connection.send_error(
+            msg["id"],
+            websocket_api.const.ERR_HOME_ASSISTANT_ERROR,
+            str(err),
+        )
+        return
+
+    connection.send_result(msg["id"], {"success": True})
 
 
 @websocket_api.require_admin
