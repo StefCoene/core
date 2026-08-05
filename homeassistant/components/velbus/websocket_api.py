@@ -4,10 +4,19 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from functools import wraps
 import inspect
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, overload
 
 import velbus_frontend as velbus_panel
+from velbusaio.action_cache import (
+    ActionScan,
+    ScanProgress,
+    cached_actions,
+    clear_action_cache,
+    save_action_cache,
+    scan_actions,
+)
 from velbusaio.autosend import decode_autosend_interval
 from velbusaio.exceptions import VelbusConfigError
 from velbusaio.panel_schema import get_module_instance_data, get_module_type_schema
@@ -34,10 +43,15 @@ if TYPE_CHECKING:
     from velbusaio.controller import Velbus
     from velbusaio.module import Module
 
+_LOGGER = logging.getLogger(__name__)
+
 URL_BASE: Final = "/velbus_static"
 DATA_STATIC_REGISTERED: Final = "static_registered"
 DATA_WS_REGISTERED: Final = "ws_registered"
 DATA_PANEL: HassKey[dict[str, bool]] = HassKey(f"{DOMAIN}_panel")
+DATA_ACTION_SCAN: HassKey[dict[str, asyncio.Task[None] | None]] = HassKey(
+    f"{DOMAIN}_action_scan"
+)
 
 type VelbusWebSocketHandler = Callable[
     [
@@ -76,6 +90,9 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_list_shared_config)
     websocket_api.async_register_command(hass, ws_set_shared_config)
     websocket_api.async_register_command(hass, ws_sync_clock)
+    websocket_api.async_register_command(hass, ws_get_all_actions)
+    websocket_api.async_register_command(hass, ws_scan_actions)
+    websocket_api.async_register_command(hass, ws_clear_action_cache)
     websocket_api.async_register_command(hass, ws_get_channel_actions)
     websocket_api.async_register_command(hass, ws_set_channel_action)
     websocket_api.async_register_command(hass, ws_clear_channel_action)
@@ -712,6 +729,229 @@ async def ws_sync_clock(
     connection.send_result(msg["id"], {"success": True})
 
 
+async def _persist_actions(controller: Velbus, address: int) -> None:
+    """Keep the cached copy of one module in step with what was just written.
+
+    Writing updates the in-memory bytes; without this the file would keep
+    describing the slot as it was before, which is worse than having no file at
+    all. A module that was never fully read writes nothing, so this is a no-op
+    until somebody has scanned it.
+    """
+    try:
+        await save_action_cache(controller, addresses=[address])
+    except OSError as err:
+        _LOGGER.warning("Could not update the cached actions of %s: %s", address, err)
+
+
+def _scan_payload(controller: Velbus, scan: ActionScan) -> dict[str, Any]:
+    """Turn a scan into what the panel needs to draw both directions.
+
+    The actions come out as one flat list rather than nested per module. Every
+    entry names both ends, so the same list indexes as "what triggers this
+    channel" and as "what does this button do", which is the whole reason for
+    reading the installation in one go.
+    """
+    modules: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    for module_actions in scan.modules.values():
+        modules.append(
+            {
+                "address": module_actions.address,
+                "name": module_actions.name,
+                "type_name": module_actions.type_name,
+                "read_at": module_actions.read_at,
+                "from_cache": module_actions.from_cache,
+                "action_count": module_actions.action_count,
+                "error": module_actions.error,
+            }
+        )
+        actions.extend(
+            {
+                **_name_source(controller, slot.to_dict()),
+                "address": module_actions.address,
+                "channel": channel,
+            }
+            for channel, slots in module_actions.channels.items()
+            for slot in slots
+        )
+    return {
+        "modules": modules,
+        "actions": actions,
+        "action_count": scan.action_count,
+        "duration": scan.duration,
+    }
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "velbus/config_panel/actions/all",
+        vol.Required(CONF_CONFIG_ENTRY): str,
+    }
+)
+@websocket_api.async_response
+@provide_velbus
+async def ws_get_all_actions(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    controller: Velbus,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return every action table that is already known, without reading the bus."""
+    connection.send_result(
+        msg["id"], _scan_payload(controller, await cached_actions(controller))
+    )
+
+
+async def _run_action_scan(
+    hass: HomeAssistant,
+    controller: Velbus,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Read the installation and report on it as it goes."""
+
+    @callback
+    def report(step: ScanProgress) -> None:
+        connection.send_message(
+            websocket_api.event_message(
+                msg["id"],
+                {
+                    "type": "progress",
+                    "done": step.done,
+                    "total": step.total,
+                    "address": step.address,
+                    "name": step.name,
+                },
+            )
+        )
+
+    try:
+        scan = await scan_actions(
+            controller,
+            force=msg["force"],
+            addresses=msg.get("addresses"),
+            progress=report,
+        )
+        # Only what was read is written, so a module that timed out keeps
+        # whatever an earlier scan learned about it.
+        await save_action_cache(
+            controller,
+            addresses=[
+                address
+                for address, module in scan.modules.items()
+                if module.error is None
+            ],
+        )
+    except (OSError, RuntimeError, ValueError, VelbusConfigError) as err:
+        connection.send_message(
+            websocket_api.event_message(
+                msg["id"], {"type": "error", "message": str(err)}
+            )
+        )
+        return
+    finally:
+        hass.data.setdefault(DATA_ACTION_SCAN, {}).pop(msg[CONF_CONFIG_ENTRY], None)
+
+    connection.send_message(
+        websocket_api.event_message(
+            msg["id"], {"type": "done", **_scan_payload(controller, scan)}
+        )
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "velbus/config_panel/actions/scan",
+        vol.Required(CONF_CONFIG_ENTRY): str,
+        vol.Optional("force", default=False): bool,
+        vol.Optional("addresses"): [
+            vol.All(vol.Coerce(int), vol.Range(min=1, max=254))
+        ],
+    }
+)
+@provide_velbus
+@callback
+def ws_scan_actions(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    controller: Velbus,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Read every action table, reporting progress as events.
+
+    A full read is minutes of bus traffic, far longer than a page is willing to
+    wait for one answer, so this subscribes: progress events while it runs, one
+    done event at the end. Closing the subscription cancels the scan.
+    """
+    running = hass.data.setdefault(DATA_ACTION_SCAN, {})
+    if msg[CONF_CONFIG_ENTRY] in running:
+        connection.send_error(
+            msg["id"],
+            websocket_api.const.ERR_HOME_ASSISTANT_ERROR,
+            "A scan of this bus is already running",
+        )
+        return
+
+    task: asyncio.Task[None] | None = None
+
+    @callback
+    def cancel_scan() -> None:
+        if task is not None:
+            task.cancel()
+
+    # Subscribe first: Home Assistant starts a task eagerly, so a scan that
+    # reports progress before its first await would send that event ahead of
+    # the answer to this very command.
+    connection.subscriptions[msg["id"]] = cancel_scan
+    connection.send_result(msg["id"])
+
+    # Claim the bus before the task exists, for the same reason: an eagerly
+    # started scan can already have finished and cleared this entry by the time
+    # async_create_task() returns, and writing the task in afterwards would
+    # leave a finished scan blocking every next one.
+    running[msg[CONF_CONFIG_ENTRY]] = None
+    task = hass.async_create_task(
+        _run_action_scan(hass, controller, connection, msg),
+        f"velbus action scan {msg[CONF_CONFIG_ENTRY]}",
+    )
+    if msg[CONF_CONFIG_ENTRY] in running:
+        running[msg[CONF_CONFIG_ENTRY]] = task
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "velbus/config_panel/actions/clear_cache",
+        vol.Required(CONF_CONFIG_ENTRY): str,
+        vol.Optional("addresses"): [
+            vol.All(vol.Coerce(int), vol.Range(min=1, max=254))
+        ],
+    }
+)
+@websocket_api.async_response
+@provide_velbus
+async def ws_clear_action_cache(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    controller: Velbus,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Forget the cached action tables so the next scan reads the bus again."""
+    try:
+        cleared = await clear_action_cache(controller, addresses=msg.get("addresses"))
+    except OSError as err:
+        connection.send_error(
+            msg["id"], websocket_api.const.ERR_HOME_ASSISTANT_ERROR, str(err)
+        )
+        return
+    connection.send_result(msg["id"], {"cleared": cleared})
+
+
 @websocket_api.require_admin
 @websocket_api.websocket_command(
     {
@@ -827,6 +1067,7 @@ async def ws_set_channel_action(
         )
         return
 
+    await _persist_actions(controller, msg[CONF_ADDRESS])
     connection.send_result(msg["id"], {"slot": slot.to_dict()})
 
 
@@ -886,6 +1127,7 @@ async def ws_clear_channel_action(
         )
         return
 
+    await _persist_actions(controller, msg[CONF_ADDRESS])
     connection.send_result(
         msg["id"],
         {"slots": [slot.to_dict() for slot in cleared]},

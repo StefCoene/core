@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 
+from velbusaio.action_cache import load_action_cache
 from velbusaio.controller import Velbus
 from velbusaio.exceptions import VelbusConnectionFailed
 
@@ -45,6 +46,18 @@ async def velbus_scan_task(
         raise PlatformNotReady(
             f"Connection error while connecting to Velbus {entry_id}: {ex}"
         ) from ex
+    # Action tables are only reachable four eeprom bytes at a time, so a full
+    # read is minutes of bus traffic. Whatever a previous run read is put back
+    # before anything asks for it; a stale entry costs a refresh, not a wrong
+    # write, because programming always reads the slot it is about to touch.
+    try:
+        restored = await load_action_cache(controller)
+    except OSError as ex:
+        _LOGGER.debug("Could not restore the Velbus action cache: %s", ex)
+    else:
+        if restored:
+            _LOGGER.debug("Restored cached action tables for %s modules", len(restored))
+
     # create all modules
     dev_reg = dr.async_get(hass)
     for module in controller.get_modules().values():
