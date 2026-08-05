@@ -874,21 +874,26 @@ async def _run_action_scan(
                 if module.error is None
             ],
         )
-    except (OSError, RuntimeError, ValueError, VelbusConfigError) as err:
+        await _warm_action_catalogs(hass, controller)
+        payload = _scan_payload(controller, scan)
+    except asyncio.CancelledError:
+        raise
+    # Whatever goes wrong, the panel has to hear about it: it is waiting on
+    # this subscription and has no other way to learn the read is over.
+    except Exception as err:
+        _LOGGER.exception("Reading the Velbus action tables failed")
         connection.send_message(
             websocket_api.event_message(
-                msg["id"], {"type": "error", "message": str(err)}
+                msg["id"],
+                {"type": "error", "message": str(err) or type(err).__name__},
             )
         )
         return
     finally:
         hass.data.setdefault(DATA_ACTION_SCAN, {}).pop(msg[CONF_CONFIG_ENTRY], None)
 
-    await _warm_action_catalogs(hass, controller)
     connection.send_message(
-        websocket_api.event_message(
-            msg["id"], {"type": "done", **_scan_payload(controller, scan)}
-        )
+        websocket_api.event_message(msg["id"], {"type": "done", **payload})
     )
 
 

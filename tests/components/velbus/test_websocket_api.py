@@ -510,6 +510,31 @@ async def test_scan_does_not_write_a_module_it_could_not_read(
     assert save.await_args.kwargs["addresses"] == []
 
 
+async def test_a_failing_scan_still_tells_the_panel(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    config_entry: MockConfigEntry,
+) -> None:
+    """The panel waits on this subscription and has no other way to be told."""
+    await init_integration(hass, config_entry)
+    client = await hass_ws_client(hass)
+
+    with patch(
+        "homeassistant.components.velbus.websocket_api.scan_actions",
+        AsyncMock(side_effect=TypeError("something unforeseen")),
+    ):
+        await client.send_json_auto_id(
+            {
+                "type": "velbus/config_panel/actions/scan",
+                "config_entry": config_entry.entry_id,
+            }
+        )
+        assert (await client.receive_json())["success"]
+        event = (await client.receive_json())["event"]
+
+    assert event == {"type": "error", "message": "something unforeseen"}
+
+
 async def test_second_scan_is_refused_while_one_runs(
     hass: HomeAssistant,
     hass_ws_client: WebSocketGenerator,
