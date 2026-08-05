@@ -17,6 +17,7 @@ from velbusaio.action_cache import (
     save_action_cache,
     scan_actions,
 )
+from velbusaio.actions import load_action_catalog
 from velbusaio.autosend import decode_autosend_interval
 from velbusaio.exceptions import VelbusConfigError
 from velbusaio.panel_schema import get_module_instance_data, get_module_type_schema
@@ -743,6 +744,25 @@ async def _persist_actions(controller: Velbus, address: int) -> None:
         _LOGGER.warning("Could not update the cached actions of %s: %s", address, err)
 
 
+async def _warm_action_catalogs(hass: HomeAssistant, controller: Velbus) -> None:
+    """Load the action catalogs before anything names an action.
+
+    Naming an action reads its catalog from disk the first time, and a slot is
+    named while a websocket answer is being built, which is on the event loop.
+    """
+    catalog_ids = {
+        table.catalog_id
+        for module in controller.get_modules().values()
+        for table in module.get_action_tables().values()
+    }
+
+    def load() -> None:
+        for catalog_id in catalog_ids:
+            load_action_catalog(catalog_id)
+
+    await hass.async_add_executor_job(load)
+
+
 def _scan_payload(controller: Velbus, scan: ActionScan) -> dict[str, Any]:
     """Turn a scan into what the panel needs to draw both directions.
 
@@ -799,9 +819,9 @@ async def ws_get_all_actions(
     msg: dict[str, Any],
 ) -> None:
     """Return every action table that is already known, without reading the bus."""
-    connection.send_result(
-        msg["id"], _scan_payload(controller, await cached_actions(controller))
-    )
+    scan = await cached_actions(controller)
+    await _warm_action_catalogs(hass, controller)
+    connection.send_result(msg["id"], _scan_payload(controller, scan))
 
 
 async def _run_action_scan(
@@ -854,6 +874,7 @@ async def _run_action_scan(
     finally:
         hass.data.setdefault(DATA_ACTION_SCAN, {}).pop(msg[CONF_CONFIG_ENTRY], None)
 
+    await _warm_action_catalogs(hass, controller)
     connection.send_message(
         websocket_api.event_message(
             msg["id"], {"type": "done", **_scan_payload(controller, scan)}
@@ -988,6 +1009,7 @@ async def ws_get_channel_actions(
         return
 
     slots = await table.get_actions(refresh=msg["refresh"], include_empty=True)
+    await _warm_action_catalogs(hass, controller)
     connection.send_result(
         msg["id"],
         {"slots": [_name_source(controller, slot.to_dict()) for slot in slots]},
