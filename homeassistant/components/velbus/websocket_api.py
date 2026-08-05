@@ -799,6 +799,14 @@ def _scan_payload(controller: Velbus, scan: ActionScan) -> dict[str, Any]:
         "actions": actions,
         "action_count": scan.action_count,
         "duration": scan.duration,
+        # How many modules could hold an action at all. A PIR has no table of
+        # its own, so counting it as unread would make a complete picture look
+        # permanently incomplete.
+        "scannable": sum(
+            1
+            for module in controller.get_modules().values()
+            if module.get_action_tables()
+        ),
     }
 
 
