@@ -851,6 +851,8 @@ async def _run_action_scan(
                     "total": step.total,
                     "address": step.address,
                     "name": step.name,
+                    "bytes_done": step.bytes_done,
+                    "bytes_total": step.bytes_total,
                 },
             )
         )

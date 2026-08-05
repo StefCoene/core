@@ -436,7 +436,16 @@ async def test_scan_reports_progress_then_the_result(
     client = await hass_ws_client(hass)
 
     async def fake_scan(controller, *, force, addresses, progress):
-        progress(ScanProgress(done=0, total=1, address=1, name="Relay"))
+        progress(
+            ScanProgress(
+                done=0,
+                total=1,
+                address=1,
+                name="Relay",
+                bytes_done=24,
+                bytes_total=96,
+            )
+        )
         return _scan()
 
     save = AsyncMock(return_value=[1])
@@ -461,6 +470,10 @@ async def test_scan_reports_progress_then_the_result(
         "total": 1,
         "address": 1,
         "name": "Relay",
+        # Reading one module is one module either way, so the bytes are what
+        # tells the user anything is happening.
+        "bytes_done": 24,
+        "bytes_total": 96,
     }
     assert done["event"]["type"] == "done"
     assert done["event"]["action_count"] == 1
