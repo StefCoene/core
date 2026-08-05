@@ -29,6 +29,7 @@ from .data import VelbusConfigEntry
 
 if TYPE_CHECKING:
     from velbusaio.channels import Channel
+    from velbusaio.config import ConfigParameter
     from velbusaio.controller import Velbus
     from velbusaio.module import Module
 
@@ -71,6 +72,8 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_module_schema)
     websocket_api.async_register_command(hass, ws_get_module)
     websocket_api.async_register_command(hass, ws_set_module_config)
+    websocket_api.async_register_command(hass, ws_list_shared_config)
+    websocket_api.async_register_command(hass, ws_set_shared_config)
     websocket_api.async_register_command(hass, ws_get_channel_actions)
     websocket_api.async_register_command(hass, ws_set_channel_action)
     websocket_api.async_register_command(hass, ws_clear_channel_action)
@@ -539,6 +542,133 @@ async def ws_set_module_config(
         return
 
     connection.send_result(msg["id"], {"success": True})
+
+
+def _shared_parameters(
+    controller: Velbus,
+) -> dict[str, list[tuple[Module, ConfigParameter]]]:
+    """Group the settings that more than one module has in common.
+
+    Only module wide settings qualify: a per channel setting like Inhibit means
+    something different on every channel, so setting it everywhere at once is
+    not a thing anyone wants. Settings that write eeprom are left out as well --
+    those are the ones where a wrong address corrupts a module, and doing that
+    to the whole installation in one click is not a button worth having.
+    """
+    shared: dict[str, list[tuple[Module, ConfigParameter]]] = {}
+    for module in controller.get_modules().values():
+        for param in module.get_config_parameters():
+            if param.writes_memory or param.channel:
+                continue
+            shared.setdefault(param.key, []).append((module, param))
+    return {key: entries for key, entries in shared.items() if len(entries) > 1}
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "velbus/config_panel/config/shared",
+        vol.Required(CONF_CONFIG_ENTRY): str,
+    }
+)
+@websocket_api.async_response
+@provide_velbus
+async def ws_list_shared_config(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    controller: Velbus,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """List the settings that can be written to every module at once."""
+    await _read_temp_settings(controller)
+    shared = _shared_parameters(controller)
+    values = await asyncio.gather(
+        *(param.get_value() for entries in shared.values() for _, param in entries),
+        return_exceptions=True,
+    )
+    read = iter(values)
+
+    settings = []
+    for entries in shared.values():
+        first = entries[0][1]
+        modules = []
+        for module, _param in entries:
+            value = next(read)
+            modules.append(
+                {
+                    "address": module.get_addresses()[0],
+                    "name": module.get_name(),
+                    "value": None if isinstance(value, BaseException) else value,
+                }
+            )
+        settings.append(
+            {
+                **first.to_dict(),
+                "modules": sorted(modules, key=lambda item: item["address"]),
+            }
+        )
+    connection.send_result(msg["id"], {"settings": settings})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "velbus/config_panel/config/set_shared",
+        vol.Required(CONF_CONFIG_ENTRY): str,
+        vol.Required("key"): str,
+        vol.Required("value"): vol.Any(str, bool, int, float),
+        # Which modules to write. Absent means every module that has the
+        # setting; the panel sends the list it showed, so a module that
+        # appeared after the page was drawn is not written unnoticed.
+        vol.Optional("addresses"): [
+            vol.All(vol.Coerce(int), vol.Range(min=1, max=254))
+        ],
+    }
+)
+@websocket_api.async_response
+@provide_velbus
+async def ws_set_shared_config(
+    hass: HomeAssistant,
+    entry: VelbusConfigEntry,
+    controller: Velbus,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Write one setting to every module that has it."""
+    entries = _shared_parameters(controller).get(msg["key"])
+    if not entries:
+        connection.send_error(
+            msg["id"],
+            websocket_api.const.ERR_INVALID_FORMAT,
+            f"No module shares the setting '{msg['key']}'",
+        )
+        return
+
+    wanted = msg.get("addresses")
+    if wanted is not None:
+        entries = [
+            entry_pair
+            for entry_pair in entries
+            if entry_pair[0].get_addresses()[0] in wanted
+        ]
+
+    # One module that does not answer must not hide what happened to the rest,
+    # so every write is reported separately instead of failing the whole call.
+    outcomes = await asyncio.gather(
+        *(param.set_value(msg["value"]) for _module, param in entries),
+        return_exceptions=True,
+    )
+    results = [
+        {
+            "address": module.get_addresses()[0],
+            "name": module.get_name(),
+            "success": not isinstance(outcome, BaseException),
+            "error": str(outcome) if isinstance(outcome, BaseException) else None,
+        }
+        for (module, _param), outcome in zip(entries, outcomes, strict=True)
+    ]
+    connection.send_result(msg["id"], {"results": results})
 
 
 @websocket_api.require_admin

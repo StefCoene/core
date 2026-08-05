@@ -204,3 +204,119 @@ async def test_a_channel_cannot_be_its_own_action_source(
     assert not response["success"]
     assert response["error"]["message"] == "A channel cannot be its own action source"
     relay.set_action.assert_not_called()
+
+
+@pytest.fixture(name="shared_params")
+def shared_params_fixture(controller: MagicMock) -> dict[int, ConfigParameter]:
+    """Give two modules a module wide bus setting and one a per channel one."""
+    params: dict[int, ConfigParameter] = {}
+    modules = {}
+    for address in (1, 99):
+        module = MagicMock()
+        module.get_address.return_value = address
+        module.get_addresses.return_value = [address]
+        module.get_name.return_value = f"Module {address}"
+        module.get_autosend_kinds.return_value = []
+        module.get_temp_settings.return_value = None
+        shared = _param(BUS_SETTING, writes_memory=False)
+        params[address] = shared
+        module.get_config_parameters.return_value = [
+            shared,
+            # Per channel, so it belongs to that channel and not to a page
+            # that writes every module at once.
+            ConfigParameter(
+                key="inhibit",
+                label="Inhibit",
+                kind="bool",
+                getter=AsyncMock(return_value=False),
+                setter=AsyncMock(),
+                channel=1,
+                writes_memory=False,
+            ),
+            # Writes eeprom, so it is not offered installation wide either.
+            _param(MEMORY_SETTING, writes_memory=True),
+        ]
+        modules[address] = module
+    controller.return_value.get_modules.return_value = modules
+    return params
+
+
+@pytest.mark.usefixtures("shared_params")
+async def test_only_module_wide_bus_settings_are_shared(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    config_entry: MockConfigEntry,
+) -> None:
+    """A per channel or eeprom setting is not offered for the whole installation."""
+    await init_integration(hass, config_entry)
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {
+            "type": "velbus/config_panel/config/shared",
+            "config_entry": config_entry.entry_id,
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"]
+    settings = response["result"]["settings"]
+    assert [setting["key"] for setting in settings] == [BUS_SETTING]
+    assert [module["address"] for module in settings[0]["modules"]] == [1, 99]
+    assert [module["value"] for module in settings[0]["modules"]] == [60, 60]
+
+
+async def test_writing_a_shared_setting_reports_every_module(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    config_entry: MockConfigEntry,
+    shared_params: dict[int, ConfigParameter],
+) -> None:
+    """One module that refuses must not hide what happened to the others."""
+    shared_params[99].setter.side_effect = OSError("no answer")
+    await init_integration(hass, config_entry)
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {
+            "type": "velbus/config_panel/config/set_shared",
+            "config_entry": config_entry.entry_id,
+            "key": BUS_SETTING,
+            "value": 120,
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"]
+    assert response["result"]["results"] == [
+        {"address": 1, "name": "Module 1", "success": True, "error": None},
+        {"address": 99, "name": "Module 99", "success": False, "error": "no answer"},
+    ]
+    shared_params[1].setter.assert_awaited_once_with(120)
+
+
+@pytest.mark.usefixtures("shared_params")
+async def test_a_shared_setting_can_be_limited_to_named_modules(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    config_entry: MockConfigEntry,
+    shared_params: dict[int, ConfigParameter],
+) -> None:
+    """The panel writes the modules it listed, not whatever exists right now."""
+    await init_integration(hass, config_entry)
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {
+            "type": "velbus/config_panel/config/set_shared",
+            "config_entry": config_entry.entry_id,
+            "key": BUS_SETTING,
+            "value": 30,
+            "addresses": [1],
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"]
+    assert [item["address"] for item in response["result"]["results"]] == [1]
+    shared_params[99].setter.assert_not_awaited()
